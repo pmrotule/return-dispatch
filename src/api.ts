@@ -57,25 +57,38 @@ export async function dispatchWorkflow(distinctId: string): Promise<void> {
 
 export async function getWorkflowId(workflowFilename: string): Promise<number> {
   try {
-    // https://docs.github.com/en/rest/reference/actions#list-repository-workflows
-    const response = await octokit.rest.actions.listRepoWorkflows({
-      owner: config.owner,
-      repo: config.repo,
-    });
-
-    if (response.status !== 200) {
-      throw new Error(
-        `Failed to get workflows, expected 200 but received ${response.status}`,
-      );
-    }
+    let workflowId: number | undefined = undefined;
+    let page = 1;
+    let hasReachedLastPage = false;
+    const perPage = 30;
 
     const sanitisedFilename = workflowFilename.replace(
       /[.*+?^${}()|[\]\\]/g,
       "\\$&",
     );
-    const workflowId = response.data.workflows.find((workflow) =>
-      new RegExp(sanitisedFilename).test(workflow.path),
-    )?.id;
+
+    while (!workflowId && !hasReachedLastPage) {
+      // https://octokit.github.io/rest.js#actions-list-repo-workflows
+      const response = await octokit.rest.actions.listRepoWorkflows({
+        owner: config.owner,
+        repo: config.repo,
+        per_page: perPage,
+        page,
+      });
+
+      if (response.status !== 200) {
+        throw new Error(
+          `Failed to get workflows, expected 200 but received ${response.status}`,
+        );
+      }
+
+      workflowId = response.data.workflows.find((workflow) =>
+        new RegExp(sanitisedFilename).test(workflow.path),
+      )?.id;
+
+      hasReachedLastPage = response.data.workflows.length < perPage;
+      page++;
+    }
 
     if (workflowId === undefined) {
       throw new Error(`Unable to find ID for Workflow: ${workflowFilename}`);
