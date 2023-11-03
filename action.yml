@@ -13,7 +13,6 @@ inputs:
     required: true
   ref:
     description: The git reference for the workflow. The reference can be a branch or tag name.
-    required: true
   repo:
     description: Repository of the action to dispatch.
     required: true
@@ -23,8 +22,15 @@ inputs:
   workflow:
     description: Workflow to return an ID for. Can be the ID or the workflow filename.
     required: true
+  workflow_trigger:
+    description: Event triggering the workflow. Can be workflow_dispatch or repository_dispatch.
+    default: workflow_dispatch
   workflow_inputs:
-    description: A flat JSON object, only supports strings (as per workflow inputs API).
+    description: A flat JSON object, only supports strings, numbers, and booleans (as per workflow inputs API).
+  event_type:
+    description: Event type in case the workflow trigger is a repository_dispatch.
+  client_payload:
+    description: Client payload in case the workflow trigger is a repository_dispatch.
   workflow_timeout_seconds:
     description: Time until giving up waiting for the start of the workflow run.
     default: 300

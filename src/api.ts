@@ -2,7 +2,7 @@ import * as core from "@actions/core";
 import * as github from "@actions/github";
 import type { GitHub } from "@actions/github/lib/utils";
 import { ActionConfig, getConfig } from "./action";
-import { getBranchName } from "./utils";
+import { getBranchName, findInPaginatedRequest } from "./utils";
 
 type Octokit = InstanceType<typeof GitHub>;
 
@@ -16,17 +16,42 @@ export function init(cfg?: ActionConfig): void {
 
 export async function dispatchWorkflow(distinctId: string): Promise<void> {
   try {
+    let response: { status: number | undefined } = { status: undefined };
+
     // https://docs.github.com/en/rest/reference/actions#create-a-workflow-dispatch-event
-    const response = await octokit.rest.actions.createWorkflowDispatch({
-      owner: config.owner,
-      repo: config.repo,
-      workflow_id: config.workflow,
-      ref: config.ref,
-      inputs: {
-        ...(config.workflowInputs ? config.workflowInputs : undefined),
-        distinct_id: distinctId,
-      },
-    });
+    if (config.workflowTrigger === "workflow_dispatch") {
+      if (!config.ref) {
+        throw new Error(
+          "Failed to dispatch action, ref must be provided for a workflow_dispatch",
+        );
+      }
+
+      response = await octokit.rest.actions.createWorkflowDispatch({
+        owner: config.owner,
+        repo: config.repo,
+        workflow_id: config.workflow,
+        ref: config.ref,
+        inputs: {
+          ...(config.workflowInputs ? config.workflowInputs : undefined),
+          distinct_id: distinctId,
+        },
+      });
+    }
+
+    if (config.workflowTrigger === "repository_dispatch") {
+      if (!config.eventType) {
+        throw new Error(
+          "Failed to dispatch action, event_type must be provided for a repository_dispatch",
+        );
+      }
+
+      response = await octokit.rest.repos.createDispatchEvent({
+        owner: config.owner,
+        repo: config.repo,
+        event_type: config.eventType,
+        client_payload: config.workflowInputs,
+      });
+    }
 
     if (response.status !== 204) {
       throw new Error(
@@ -34,13 +59,23 @@ export async function dispatchWorkflow(distinctId: string): Promise<void> {
       );
     }
 
+    const workflowInputsLabel =
+      config.workflowTrigger === "repository_dispatch"
+        ? "Client payload"
+        : "Workflow Inputs";
+
     core.info(
       "Successfully dispatched workflow:\n" +
         `  Repository: ${config.owner}/${config.repo}\n` +
-        `  Branch: ${config.ref}\n` +
+        (config.workflowTrigger === "workflow_dispatch"
+          ? `  Branch: ${config.ref}\n`
+          : "") +
         `  Workflow ID: ${config.workflow}\n` +
+        (config.eventType ? `  Event type: ${config.eventType}\n` : "") +
         (config.workflowInputs
-          ? `  Workflow Inputs: ${JSON.stringify(config.workflowInputs)}\n`
+          ? `  ${workflowInputsLabel}: ${JSON.stringify(
+              config.workflowInputs,
+            )}\n`
           : ``) +
         `  Distinct ID: ${distinctId}`,
     );
@@ -57,38 +92,34 @@ export async function dispatchWorkflow(distinctId: string): Promise<void> {
 
 export async function getWorkflowId(workflowFilename: string): Promise<number> {
   try {
-    let workflowId: number | undefined = undefined;
-    let page = 1;
-    let hasReachedLastPage = false;
-    const perPage = 30;
-
     const sanitisedFilename = workflowFilename.replace(
       /[.*+?^${}()|[\]\\]/g,
       "\\$&",
     );
 
-    while (!workflowId && !hasReachedLastPage) {
-      // https://octokit.github.io/rest.js#actions-list-repo-workflows
-      const response = await octokit.rest.actions.listRepoWorkflows({
-        owner: config.owner,
-        repo: config.repo,
-        per_page: perPage,
-        page,
-      });
-
-      if (response.status !== 200) {
-        throw new Error(
-          `Failed to get workflows, expected 200 but received ${response.status}`,
-        );
-      }
-
-      workflowId = response.data.workflows.find((workflow) =>
-        new RegExp(sanitisedFilename).test(workflow.path),
-      )?.id;
-
-      hasReachedLastPage = response.data.workflows.length < perPage;
-      page++;
-    }
+    const workflowId = await findInPaginatedRequest({
+      async request({ perPage, page }) {
+        return await octokit.rest.actions.listRepoWorkflows({
+          owner: config.owner,
+          repo: config.repo,
+          per_page: perPage,
+          page,
+        });
+      },
+      find(response) {
+        if (response.status !== 200) {
+          throw new Error(
+            `Failed to get workflows, expected 200 but received ${response.status}`,
+          );
+        }
+        return response.data.workflows.find((workflow) =>
+          new RegExp(sanitisedFilename).test(workflow.path),
+        )?.id;
+      },
+      hasReachedLastPage(response, { perPage }) {
+        return response.data.workflows.length < perPage;
+      },
+    });
 
     if (workflowId === undefined) {
       throw new Error(`Unable to find ID for Workflow: ${workflowFilename}`);
@@ -142,37 +173,39 @@ export async function getWorkflowRunUrl(runId: number): Promise<string> {
 
 export async function getWorkflowRunIds(workflowId: number): Promise<number[]> {
   try {
-    const branchName = getBranchName(config.ref);
+    const branch =
+      config.ref && config.workflowTrigger === "workflow_dispatch"
+        ? getBranchName(config.ref) || undefined
+        : undefined;
 
-    // https://docs.github.com/en/rest/reference/actions#list-workflow-runs
-    const response = await octokit.rest.actions.listWorkflowRuns({
-      owner: config.owner,
-      repo: config.repo,
-      workflow_id: workflowId,
-      ...(branchName
-        ? {
-            branch: branchName,
-            per_page: 5,
-          }
-        : {
-            per_page: 10,
-          }),
+    const runIds = await findInPaginatedRequest({
+      async request({ perPage, page }) {
+        return await octokit.rest.actions.listWorkflowRuns({
+          owner: config.owner,
+          repo: config.repo,
+          workflow_id: workflowId,
+          branch,
+          per_page: perPage,
+          page,
+        });
+      },
+      find(response) {
+        if (response.status !== 200) {
+          throw new Error(
+            `Failed to get Workflow runs, expected 200 but received ${response.status}`,
+          );
+        }
+        return response.data.workflow_runs.map((workflowRun) => workflowRun.id);
+      },
+      hasReachedLastPage(response, { perPage }) {
+        return response.data.workflow_runs.length < perPage;
+      },
     });
-
-    if (response.status !== 200) {
-      throw new Error(
-        `Failed to get Workflow runs, expected 200 but received ${response.status}`,
-      );
-    }
-
-    const runIds = response.data.workflow_runs.map(
-      (workflowRun) => workflowRun.id,
-    );
 
     core.debug(
       "Fetched Workflow Runs:\n" +
         `  Repository: ${config.owner}/${config.repo}\n` +
-        `  Branch: ${branchName || "undefined"}\n` +
+        `  Branch: ${branch || "undefined"}\n` +
         `  Workflow ID: ${workflowId}\n` +
         `  Runs Fetched: [${runIds}]`,
     );

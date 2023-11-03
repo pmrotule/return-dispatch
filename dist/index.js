@@ -7834,11 +7834,15 @@ var WORKFLOW_TIMEOUT_SECONDS = 5 * 60;
 function getConfig() {
   return {
     token: core.getInput("token", { required: true }),
-    ref: core.getInput("ref", { required: true }),
+    ref: core.getInput("ref") || void 0,
     repo: core.getInput("repo", { required: true }),
     owner: core.getInput("owner", { required: true }),
     workflow: getWorkflowValue(core.getInput("workflow", { required: true })),
-    workflowInputs: getWorkflowInputs(core.getInput("workflow_inputs")),
+    workflowTrigger: core.getInput("workflow_trigger"),
+    workflowInputs: getWorkflowInputs(
+      core.getInput("workflow_inputs") || core.getInput("client_payload")
+    ),
+    eventType: core.getInput("event_type") || void 0,
     workflowTimeoutSeconds: getNumberFromValue(core.getInput("workflow_timeout_seconds")) || WORKFLOW_TIMEOUT_SECONDS
   };
 }
@@ -7919,6 +7923,22 @@ function getBranchName(ref) {
   }
   return branchName;
 }
+async function findInPaginatedRequest(options) {
+  const perPage = 30;
+  let page = 1;
+  let itemFound = void 0;
+  let hasReachedLastPage = false;
+  while (!itemFound && !hasReachedLastPage) {
+    const response = await options.request({ perPage, page });
+    itemFound = options.find(response);
+    hasReachedLastPage = options.hasReachedLastPage(response, {
+      perPage,
+      page
+    });
+    page++;
+  }
+  return itemFound;
+}
 
 // src/api.ts
 var config;
@@ -7929,27 +7949,52 @@ function init(cfg) {
 }
 async function dispatchWorkflow(distinctId) {
   try {
-    const response = await octokit.rest.actions.createWorkflowDispatch({
-      owner: config.owner,
-      repo: config.repo,
-      workflow_id: config.workflow,
-      ref: config.ref,
-      inputs: {
-        ...config.workflowInputs ? config.workflowInputs : void 0,
-        distinct_id: distinctId
+    let response = { status: void 0 };
+    if (config.workflowTrigger === "workflow_dispatch") {
+      if (!config.ref) {
+        throw new Error(
+          "Failed to dispatch action, ref must be provided for a workflow_dispatch"
+        );
       }
-    });
+      response = await octokit.rest.actions.createWorkflowDispatch({
+        owner: config.owner,
+        repo: config.repo,
+        workflow_id: config.workflow,
+        ref: config.ref,
+        inputs: {
+          ...config.workflowInputs ? config.workflowInputs : void 0,
+          distinct_id: distinctId
+        }
+      });
+    }
+    if (config.workflowTrigger === "repository_dispatch") {
+      if (!config.eventType) {
+        throw new Error(
+          "Failed to dispatch action, event_type must be provided for a repository_dispatch"
+        );
+      }
+      response = await octokit.rest.repos.createDispatchEvent({
+        owner: config.owner,
+        repo: config.repo,
+        event_type: config.eventType,
+        client_payload: config.workflowInputs
+      });
+    }
     if (response.status !== 204) {
       throw new Error(
         `Failed to dispatch action, expected 204 but received ${response.status}`
       );
     }
+    const workflowInputsLabel = config.workflowTrigger === "repository_dispatch" ? "Client payload" : "Workflow Inputs";
     core3.info(
       `Successfully dispatched workflow:
   Repository: ${config.owner}/${config.repo}
-  Branch: ${config.ref}
-  Workflow ID: ${config.workflow}
-` + (config.workflowInputs ? `  Workflow Inputs: ${JSON.stringify(config.workflowInputs)}
+` + (config.workflowTrigger === "workflow_dispatch" ? `  Branch: ${config.ref}
+` : "") + `  Workflow ID: ${config.workflow}
+` + (config.eventType ? `  Event type: ${config.eventType}
+` : "") + (config.workflowInputs ? `  ${workflowInputsLabel}: ${JSON.stringify(
+        config.workflowInputs
+      )}
 ` : ``) + `  Distinct ID: ${distinctId}`
     );
   } catch (error4) {
@@ -7964,32 +8009,33 @@ async function dispatchWorkflow(distinctId) {
 }
 async function getWorkflowId(workflowFilename) {
   try {
-    let workflowId = void 0;
-    let page = 1;
-    let hasReachedLastPage = false;
-    const perPage = 30;
     const sanitisedFilename = workflowFilename.replace(
       /[.*+?^${}()|[\]\\]/g,
       "\\$&"
     );
-    while (!workflowId && !hasReachedLastPage) {
-      const response = await octokit.rest.actions.listRepoWorkflows({
-        owner: config.owner,
-        repo: config.repo,
-        per_page: perPage,
-        page
-      });
-      if (response.status !== 200) {
-        throw new Error(
-          `Failed to get workflows, expected 200 but received ${response.status}`
-        );
+    const workflowId = await findInPaginatedRequest({
+      async request({ perPage, page }) {
+        return await octokit.rest.actions.listRepoWorkflows({
+          owner: config.owner,
+          repo: config.repo,
+          per_page: perPage,
+          page
+        });
+      },
+      find(response) {
+        if (response.status !== 200) {
+          throw new Error(
+            `Failed to get workflows, expected 200 but received ${response.status}`
+          );
+        }
+        return response.data.workflows.find(
+          (workflow) => new RegExp(sanitisedFilename).test(workflow.path)
+        )?.id;
+      },
+      hasReachedLastPage(response, { perPage }) {
+        return response.data.workflows.length < perPage;
       }
-      workflowId = response.data.workflows.find(
-        (workflow) => new RegExp(sanitisedFilename).test(workflow.path)
-      )?.id;
-      hasReachedLastPage = response.data.workflows.length < perPage;
-      page++;
-    }
+    });
     if (workflowId === void 0) {
       throw new Error(`Unable to find ID for Workflow: ${workflowFilename}`);
     }
@@ -8035,30 +8081,34 @@ async function getWorkflowRunUrl(runId) {
 }
 async function getWorkflowRunIds(workflowId) {
   try {
-    const branchName = getBranchName(config.ref);
-    const response = await octokit.rest.actions.listWorkflowRuns({
-      owner: config.owner,
-      repo: config.repo,
-      workflow_id: workflowId,
-      ...branchName ? {
-        branch: branchName,
-        per_page: 5
-      } : {
-        per_page: 10
+    const branch = config.ref && config.workflowTrigger === "workflow_dispatch" ? getBranchName(config.ref) || void 0 : void 0;
+    const runIds = await findInPaginatedRequest({
+      async request({ perPage, page }) {
+        return await octokit.rest.actions.listWorkflowRuns({
+          owner: config.owner,
+          repo: config.repo,
+          workflow_id: workflowId,
+          branch,
+          per_page: perPage,
+          page
+        });
+      },
+      find(response) {
+        if (response.status !== 200) {
+          throw new Error(
+            `Failed to get Workflow runs, expected 200 but received ${response.status}`
+          );
+        }
+        return response.data.workflow_runs.map((workflowRun) => workflowRun.id);
+      },
+      hasReachedLastPage(response, { perPage }) {
+        return response.data.workflow_runs.length < perPage;
       }
     });
-    if (response.status !== 200) {
-      throw new Error(
-        `Failed to get Workflow runs, expected 200 but received ${response.status}`
-      );
-    }
-    const runIds = response.data.workflow_runs.map(
-      (workflowRun) => workflowRun.id
-    );
     core3.debug(
       `Fetched Workflow Runs:
   Repository: ${config.owner}/${config.repo}
-  Branch: ${branchName || "undefined"}
+  Branch: ${branch || "undefined"}
   Workflow ID: ${workflowId}
   Runs Fetched: [${runIds}]`
     );

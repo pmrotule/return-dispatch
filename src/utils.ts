@@ -35,3 +35,29 @@ export function getBranchName(ref: string): string | undefined {
 
   return branchName;
 }
+
+export async function findInPaginatedRequest<T, R>(options: {
+  request: (options: { perPage: number; page: number }) => Promise<T>;
+  find: (response: T) => R;
+  hasReachedLastPage: (
+    response: T,
+    options: { perPage: number; page: number },
+  ) => boolean;
+}): Promise<R> {
+  const perPage = 30;
+  let page = 1;
+  let itemFound: R | undefined = undefined;
+  let hasReachedLastPage = false;
+
+  while (!itemFound && !hasReachedLastPage) {
+    const response = await options.request({ perPage, page });
+
+    itemFound = options.find(response);
+    hasReachedLastPage = options.hasReachedLastPage(response, {
+      perPage,
+      page,
+    });
+    page++;
+  }
+  return itemFound as R;
+}

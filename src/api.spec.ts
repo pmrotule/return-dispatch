@@ -198,6 +198,7 @@ describe("API", () => {
       repo: "repository",
       owner: "owner",
       workflow: "workflow_name",
+      workflowTrigger: "workflow_dispatch" as const,
       workflowInputs: { testInput: "test" },
       workflowTimeoutSeconds: 60,
     };

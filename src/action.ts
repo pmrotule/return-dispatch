@@ -14,7 +14,7 @@ export interface ActionConfig {
   /**
    * The git reference for the workflow. The reference can be a branch or tag name.
    */
-  ref: string;
+  ref?: string;
 
   /**
    * Repository of the action to await.
@@ -32,9 +32,24 @@ export interface ActionConfig {
   workflow: string | number;
 
   /**
-   * A flat JSON object, only supports strings (as per workflow inputs API).
+   * Workflow to return an ID for. Can be the ID or the workflow filename.
+   */
+  workflowTrigger: ActionWorkflowTrigger;
+
+  /**
+   * A flat JSON object, only supports strings, numbers, and booleans (as per workflow inputs API).
    */
   workflowInputs?: ActionWorkflowInputs;
+
+  /**
+   * Event type in case the workflow trigger is a repository_dispatch.
+   */
+  eventType?: string;
+
+  /**
+   * A flat JSON object, only supports strings, numbers, and booleans (as per workflow inputs API).
+   */
+  clientPayload?: ActionWorkflowInputs;
 
   /**
    * Time until giving up on identifying the Run ID.
@@ -43,8 +58,10 @@ export interface ActionConfig {
 }
 
 interface ActionWorkflowInputs {
-  [input: string]: string;
+  [input: string]: string | number | boolean;
 }
+
+type ActionWorkflowTrigger = "workflow_dispatch" | "repository_dispatch";
 
 export enum ActionOutputs {
   runId = "run_id",
@@ -53,11 +70,15 @@ export enum ActionOutputs {
 export function getConfig(): ActionConfig {
   return {
     token: core.getInput("token", { required: true }),
-    ref: core.getInput("ref", { required: true }),
+    ref: core.getInput("ref") || undefined,
     repo: core.getInput("repo", { required: true }),
     owner: core.getInput("owner", { required: true }),
     workflow: getWorkflowValue(core.getInput("workflow", { required: true })),
-    workflowInputs: getWorkflowInputs(core.getInput("workflow_inputs")),
+    workflowTrigger: core.getInput("workflow_trigger") as ActionWorkflowTrigger,
+    workflowInputs: getWorkflowInputs(
+      core.getInput("workflow_inputs") || core.getInput("client_payload"),
+    ),
+    eventType: core.getInput("event_type") || undefined,
     workflowTimeoutSeconds:
       getNumberFromValue(core.getInput("workflow_timeout_seconds")) ||
       WORKFLOW_TIMEOUT_SECONDS,
