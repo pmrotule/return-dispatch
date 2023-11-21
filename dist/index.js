@@ -1621,7 +1621,7 @@ var require_oidc_utils = __commonJS({
  
         Error Code : ${error4.statusCode}
  
-        Error Message: ${error4.result.message}`);
+        Error Message: ${error4.message}`);
           });
           const id_token = (_a = res.result) === null || _a === void 0 ? void 0 : _a.value;
           if (!id_token) {
@@ -7799,7 +7799,7 @@ for (let i = 0; i < 256; ++i) {
   byteToHex2.push((i + 256).toString(16).slice(1));
 }
 function unsafeStringify(arr, offset = 0) {
-  return (byteToHex2[arr[offset + 0]] + byteToHex2[arr[offset + 1]] + byteToHex2[arr[offset + 2]] + byteToHex2[arr[offset + 3]] + "-" + byteToHex2[arr[offset + 4]] + byteToHex2[arr[offset + 5]] + "-" + byteToHex2[arr[offset + 6]] + byteToHex2[arr[offset + 7]] + "-" + byteToHex2[arr[offset + 8]] + byteToHex2[arr[offset + 9]] + "-" + byteToHex2[arr[offset + 10]] + byteToHex2[arr[offset + 11]] + byteToHex2[arr[offset + 12]] + byteToHex2[arr[offset + 13]] + byteToHex2[arr[offset + 14]] + byteToHex2[arr[offset + 15]]).toLowerCase();
+  return byteToHex2[arr[offset + 0]] + byteToHex2[arr[offset + 1]] + byteToHex2[arr[offset + 2]] + byteToHex2[arr[offset + 3]] + "-" + byteToHex2[arr[offset + 4]] + byteToHex2[arr[offset + 5]] + "-" + byteToHex2[arr[offset + 6]] + byteToHex2[arr[offset + 7]] + "-" + byteToHex2[arr[offset + 8]] + byteToHex2[arr[offset + 9]] + "-" + byteToHex2[arr[offset + 10]] + byteToHex2[arr[offset + 11]] + byteToHex2[arr[offset + 12]] + byteToHex2[arr[offset + 13]] + byteToHex2[arr[offset + 14]] + byteToHex2[arr[offset + 15]];
 }
 
 // node_modules/uuid/dist/esm-node/native.js
@@ -7864,9 +7864,9 @@ function getWorkflowInputs(workflowInputs) {
     const parsedJson = JSON.parse(workflowInputs);
     for (const key of Object.keys(parsedJson)) {
       const type = typeof parsedJson[key];
-      if (type !== "string") {
+      if (!["string", "number", "boolean"].includes(type)) {
         throw new Error(
-          `Expected values to be strings, ${key} value is ${type}`
+          `Expected value to be string, number, or boolean. "${key}" value is ${type}`
         );
       }
     }
@@ -7964,22 +7964,32 @@ async function dispatchWorkflow(distinctId) {
 }
 async function getWorkflowId(workflowFilename) {
   try {
-    const response = await octokit.rest.actions.listRepoWorkflows({
-      owner: config.owner,
-      repo: config.repo
-    });
-    if (response.status !== 200) {
-      throw new Error(
-        `Failed to get workflows, expected 200 but received ${response.status}`
-      );
-    }
     const sanitisedFilename = workflowFilename.replace(
       /[.*+?^${}()|[\]\\]/g,
       "\\$&"
     );
-    const workflowId = response.data.workflows.find(
-      (workflow) => new RegExp(sanitisedFilename).test(workflow.path)
-    )?.id;
+    const workflowIterator = octokit.paginate.iterator(
+      octokit.rest.actions.listRepoWorkflows,
+      {
+        owner: config.owner,
+        repo: config.repo
+      }
+    );
+    let workflowId;
+    for await (const response of workflowIterator) {
+      if (response.status !== 200) {
+        throw new Error(
+          `Failed to get workflows, expected 200 but received ${response.status}`
+        );
+      }
+      const workflows = response.data;
+      workflowId = workflows.find(
+        (workflow) => new RegExp(sanitisedFilename).test(workflow.path)
+      )?.id;
+      if (workflowId !== void 0) {
+        break;
+      }
+    }
     if (workflowId === void 0) {
       throw new Error(`Unable to find ID for Workflow: ${workflowFilename}`);
     }
